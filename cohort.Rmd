@@ -1,0 +1,13 @@
+---
+title: "MIMIC-III Cohort Generation & Dataset Formation"
+output: html_notebook
+author: C. V. Cosgriff
+---
+
+## Introduction
+
+## Inclusion and Exclusion Criteria
+
+## Cohort Generation
+
+## Dataset Generation
