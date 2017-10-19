@@ -1,13 +1,551 @@
 ---
-title: "MIMIC-III Cohort Generation & Dataset Formation"
-output: html_notebook
-author: C. V. Cosgriff
+title: "Hyperoxia & Sepsis: Preliminary Report"
+author: "C. V. Cosgriff, MD/MPH Student, Harvard Chan School"
+output:
+  pdf_document: default
 ---
 
-## Introduction
 
-## Inclusion and Exclusion Criteria
+
+## Introduction and Background
+Supplemental oxygen is believed to be the most commonly administered therapy in 
+the hospital Often thought benign, there is evidence of harm associated with 
+hyperoxia in both basic scientific and clinical models. The danger of 
+supratherapeutic oxygen administration in patients at risk for hypercapnic 
+respiratory failure is well known, with a recommended oxygen saturation target 
+of 88-92%, although no RCT has ever examined this target range.
+
+In patients not at risk for hypercapnic respiratory failure, the British 
+Thoracic Society recommends a saturation target of 94-98%.There is evidence of 
+harm from hyperoxia in nontraumatic cardiac arrests, STEMI, trauma, TBI, stroke,
+subarachnoid hemorrhage, and mixed ICU cohorts. A 2015 meta-analysis also 
+reported statistically significant adjusted pooled odds ratios for hospital 
+mortality of 1.21 in critically ill patients with arterial hyperoxia. However, 
+clinical equipoise persists with respect to hyperoxygenation in sepsis.
+
+Hyperoxia has been shown to be detrimental in a murine model of fulminant 
+sepsis, but it has also been demonstrated to provide micro and macrocirculatory 
+benefit in an model of sepsis based upon ovine peritonitis. Conservative 
+strategies of oxygenation specifically in septic shock were associated with a 
+mortality benefit, but only one third of subjects were actually in shock. 
+Hyperoxia can enhance antimicrobial defenses, but there is contrary evidence 
+that hyperoxia is independently associated with ventilator-associated pneumonia.
+
+A recent RCT examining hyperoxia had to be terminated early because of a 
+non-significant trend increased mortality in the intervention arms. An editorial 
+regarding this trial noted that it answered the question of hyperoxia and sepsis, 
+finding no role for the intervention in managing these patients, but termination 
+before the achievement of statistically significant result leaves open the 
+question, and so far no prior study has provided a definitive answer.
+
+## Research Hypothesis
+Research Hypotheses: In adult ICU patients with sepsis who survive their ICU 
+stay, the duration of hyperoxygenation (SpO2 >98%) while ventilated is 
+associated with in-hospital mortality.
+
+## Study Population
+The study population is adults (>16 years old) admitted to the ICU at Beth 
+Israel Deaconess Medical Center with a diagnosis of sepsis. ICD-9 codes 
+described by Martin et al. will be used to code for sepsis. Patients with more 
+than two SpO2 recordings below 94% while on the ventilator will be excluded in 
+order to principally capture patients with normal lung physiology at baseline. 
+Other exclusion criteria include: patients who did not survive their ICU stay, 
+and patients with ICU admission durations less than four hours. Patients with 
+multiple ICU courses will not be excluded as this is not expected to be a 
+confounder of the exposure outcome relationship. The key inclusion criterion is 
+having been ventilated in the ICU, and thus only patients with vent durations >0 
+will be included; ventilated patients are expected to have sufficient SpO2 data 
+available.
+
+Having reviewed the SpO2 dataset, I also believe that we should exclude short
+durations of ventilation (<4 hr).
+
+## Study Outcomes
+The primary outcome was initially proposed by me to be a composite outcome, and 
+I thought in-hospital mortality and mortality at one year would be secondary.
+Having conferred with colleagues I believe the two seperate outcomes may be 
+better to report. I also think Leo wants to look at them that way as well.
+
+## Covariates of Interest
+The principle covariate of interest is duration of hyperoxia defined as the time 
+in minutes that the arterial hemoglobin saturation obtained by pulse oximetry is 
+greater than 98% while on ventilation. This will be modeled as a categorical 
+variable; hyperoxic durations will be adjusted for ventilator durations and a 
+categorical variable will be generated from quartiles of this distribution.
+
+The ventilation duration will be modeled categorically following the same
+procedure as for hyperoxia.
+
+## Confounders
+Potential confounders of the relationship between SpO2 and in-hospital mortality 
+include: age (modeled as a continuous), burden of comorbidity (Elixhauser 
+co-morbidity score, modeled as continuous), disease severity (OASIS severity score, 
+continuous), and vasopressors administered during ICU stay (binary). 
+
+## Limitations
+The use of a single-center database challenges generalizability. There is also a
+general lack of guidance on what constitutes normoxia, thus threatening our 
+classification of the exposure and ability to detect an effect.
 
 ## Cohort Generation
+We will connect to the MIMIC-III database and work initially in SQL to build a
+cohort. The connection to the databse is made with RPostgresSQL, although the 
+code; users of this code are advised to generate a connection named "mimic" 
+approriate to their envrionement. 
+
+### Database Connection
+
+```{r message = FALSE, warning = FALSE}
+library(RPostgreSQL)
+drv <- dbDriver("PostgreSQL")
+mimic <- dbConnect(drv, dbname = "mimic", host = mimichost, port = 5432,
+                   user = "mimicuser", password = pw )
+```
+
+
+
+### Prior Materialized Views
+The generation of this cohort will rely on multiple previously created 
+materialized views. All of the materialized view codes below were created by 
+Alistair Johnson et al. from the MIT Laboratory for Computational Physiology. 
+They were all attained from [this](https://github.com/MIT-LCP/mimic-code/) 
+codebase.
+
+Because of the nature of the data, creating all of the flags for the exclusion
+criteria proved too computationally expensive. As such, the cohort was built in
+stages.
+
+The first stage grabs everything needed for exlcusion criteria except for 
+determining if the patient has ever desated to <94% while on a vent in the ICU
+as this was computationally expensive to check for all ~60k patients.
+
+The second stage creates a table that exclusdes all of these patients, and from 
+there a table of all SpO2 readings below 94% is generated for all the icustays
+present in the cohort. If there were more than two desats for an icustay between
+the start and end times of ventilation then the patients were excluded from
+the cohort.
+
+Finally, a flag was developed to exclude hospitals admissions in which the 
+patient died in the ICU.
+
+The code that was used to generate the
+cohort can be found on the git [repository](https://github.com/cosgriffc/hyperoxia-sepsis).
 
 ## Dataset Generation
+
+### Required Libraries
+
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)
+```
+
+
+With the cohort and SpO2 tables created, we next create a single dataframe for
+our study. 
+
+The initial plan was to directly interface the SQL databse via RPostgreSQL.
+However, there is a bug in the implementation of RPostgreSQL that was causing
+times to be stripped from dates, and, as such, the second dataset which contained
+times was pulled from SQL into a CSV file and loaded off the local disk.
+
+The cohort was pulled via RPostgreSQL. 
+```{r, warning = FALSE, message = FALSE}
+cohort.df <- dbGetQuery(mimic, 
+                        "SELECT * FROM mimiciii.hyperoxia_sepsis_covariates2")
+
+colnames.spo2 <- c("row_id", "subject_id", "hadm_id", "icustay_id",
+                   "charttime", "ventstart", "ventend", "valuenum")
+spo2.df <- read_csv("D:/HST953_data/hyperoxia_sepsis_spo2.csv", col_names = colnames.spo2)
+```
+
+## Cleaning Extraction
+
+The below code demonstrates that there are a few values pulled from the database
+which are not physiologically possible or are NA. Compared to the 100,000+
+recordings, these may be discarded.
+```{r}
+spo2.df[spo2.df$valuenum > 100,]$valuenum
+length(spo2.df[spo2.df$valuenum > 100,]$valuenum)
+```
+
+SpO2 alues over 100 are not real, and will be excluded. However, 
+this was not much of an issue as there were only three such values in the data.
+
+Because we excluded patients with more than two SpO2 readings below 94 in an 
+attempt to only examine patients with normal lung physiology any readings that
+happened to be below 94 in the dataset now are likely measurement error, and
+can be excluded. Regardless, they would not be part of the analysis. 
+
+
+Missing values following these exclusions were also omitted.
+```{r}
+spo2.tidy.df <- spo2.df %>% filter(valuenum <= 100 & valuenum >= 94) %>%
+  na.omit()
+```
+
+In addition, now that we have both tables in R, we should examine if there are 
+any patients for whom, despite >4 hours on the vent, did not have SpO2 data
+recorded. With a standard of recording every 1 hour, patients with four hours
+on the vent should have at least four recordings.
+
+We will remove patients with less than four recordings from the analysis.
+
+```{r}
+spo2.count.df <- spo2.tidy.df %>% group_by(icustay_id) %>% 
+  summarize(count = n()) %>% filter(count < 4)
+print(spo2.count.df)
+cohort.df <- cohort.df %>% filter(!(cohort.df$icustay_id %in% spo2.count.df$icustay_id))
+spo2.tidy.df <- spo2.tidy.df %>% filter(!(spo2.tidy.df$icustay_id %in% spo2.count.df$icustay_id))
+```
+
+However, it appears to be one crazy outlier and 31 missing numbers. ~149,000 recordings
+these can be safeley excluded.
+
+### A Quick Look at Our SpO2 Data After Tidy
+```{r}
+ggplot(spo2.tidy.df) + geom_histogram(aes(x = spo2.tidy.df$valuenum), binwidth = 1) +
+  xlab("SpO2") + ylab("Count")
+```
+ 
+This graph looks significantly better, and also demonstrates what we would have
+expected for the cohort.
+
+## Dataset Generation
+
+### Duration of Exposure
+In order to create one dataframe, we need to calculate the duration of exposure 
+for each ICU stay, and so a function to determine this was developed. Intervals
+are developed from chart times, and SpO2 values are considered constant between 
+each interval.
+
+```{r}
+hyperoxicTime<- function(times, value) {
+  icustay.spO2 <- data.frame(time = times, value = value)
+  icustay.spO2 <- icustay.spO2[order(icustay.spO2$time),]
+  intervals <- as.numeric(icustay.spO2$time - lag(icustay.spO2$time))
+  intervals <- lead(intervals)
+  intervals[is.na(intervals)] <- 0
+  # Intervals are usually ~60, we will tolerate as many as three missed entries
+  # or other errors; beyond that the result will be tossed.
+  intervals[intervals >= 3*60] <- 0
+  icustay.spO2 <- icustay.spO2 %>% mutate(duration = intervals)
+  o2levels <- icustay.spO2 %>% group_by(value) %>% 
+    summarize(time_at = as.numeric(sum(duration))) %>% arrange(desc(value))
+  o2levels[is.na(o2levels)] <- 0
+  colnames(o2levels)[1] <- "satValue"
+  dur.100 <- as.numeric(o2levels[o2levels$satValue == 100, 2])
+  dur.99 <-  as.numeric(o2levels[o2levels$satValue == 99, 2])
+  if (is.null(dur.100) | length(dur.100) <= 0) {
+    dur.100 <- 0
+  }
+    if (is.null(dur.99) | length(dur.99) <= 0) {
+    dur.99 <- 0
+  }
+  if (is.na(dur.100)) {
+    dur.100 <- 0
+  }
+  if (is.na(dur.99)) {
+    dur.99 <- 0
+  }
+  (dur.100 + dur.99) / 60
+}
+```
+
+With this function, durations of hyperoxia (>98%) were calcualted for each ICU 
+stay ID.
+
+```{r}
+spo2.profiled <- spo2.tidy.df %>% 
+  group_by(icustay_id) %>% 
+  summarize(hyperoxic_dur = as.numeric(hyperoxicTime(charttime, valuenum)))
+```
+
+These data were then merged with our cohort data.
+
+```{r}
+hs.df <- merge(cohort.df, spo2.profiled, by = "icustay_id")
+```
+
+Because there could be multiple ICU stays per hospital admission, and because
+we are are curious about in-hospital mortality by admission, we next summarize 
+by hadm_id. Because the OASIS score is calculated for each ICU stay, we'll take
+use their highest OASIS as the OASIS for the overall admission. Also note, we
+take the average of age, but it should be virtually identical across the admission.
+
+```{r}
+hs.df <- hs.df %>% group_by(hadm_id, subject_id, elixhauser,
+                            vasopressor_flag) %>%
+  summarize(oasis = max(oasis), age = mean(age), vent_dur = sum(vent_duration),
+            hyperoxic_dur = sum(hyperoxic_dur), 
+            hospital_expire = as.numeric(any(hospital_expire_flag == 1)),
+            oneyear_expire = as.numeric(any(one_year_expire == 1))) %>%
+  mutate(composite_expire = as.numeric(hospital_expire == 1 | oneyear_expire == 1 ))
+```
+
+Because some patients have ages of 300 because of confidentiality rules in MIMIC,
+we will assume these patients to be 90.
+
+```{r}
+hs.df[hs.df$age > 90, "age"] <- 90
+```
+
+As discussed with Leo, the next step is creating bins for the hyperoxic durations.
+This will be based on quartiles of the distribution. The same procedure will be
+applied to ventilation durations.
+
+```{r}
+hs.df$hyperoxic_quartile <- with(hs.df, cut(hyperoxic_dur, 
+                                breaks = quantile(hyperoxic_dur, probs = seq(0,1, by = (1/4)), na.rm=TRUE), 
+                                include.lowest = TRUE))
+hs.df$vent_quartile <- with(hs.df, cut(vent_dur, 
+                                breaks = quantile(vent_dur, probs = seq(0,1, by = (1/4)), na.rm=TRUE), 
+                                include.lowest = TRUE))
+```
+
+These quartiles will then be used to assign groups 1 to 4.
+
+```{r, warnings = FALSE, messages = FALSE}
+hyperoxia.levels <- levels(hs.df$hyperoxic_quartile)
+vent.levels <- levels(hs.df$vent_quartile)
+hs.df$hyperoxic_group <- 0
+hs.df$vent_group <- 0
+for (i in 1:4) {
+  hs.df$hyperoxic_group[hs.df$hyperoxic_quartile == hyperoxia.levels[i]] <- i
+  hs.df$vent_group[hs.df$vent_quartile == vent.levels[i]] <- i
+}
+```
+
+Now the data can be explored.
+
+### Some Sanity Checks
+We can be certain of a simple truth: the hyperoxic duration should be, in general,
+associated with the duration of ventilation, and should never exceed it. A quick
+check via graphing is instructive.
+
+```{r}
+ggplot(hs.df) + geom_point(aes(x = vent_dur, y = hyperoxic_dur, alpha = 0.5)) +
+  xlab("Ventilation Duration (hours)") + ylab("Hyperoxic Duration (hours)")
+```
+
+This chart looks as we expect, and it appears our function did its job properly.
+
+## Preliminary Analysis
+
+
+### Primary Ouctome
+First, lets examine what percentage of the admissions achieved the primary outcome.
+
+```{r}
+mean(hs.df$hospital_expire)
+```
+
+Unfortunately, only about 7% of the cohort achieved the primary outcome. This
+is likely related to the exclusion of deaths that occured while still in the ICU.
+
+```{r}
+mean(hs.df$oneyear_expire)
+```
+
+Expiration at one year does better. 
+
+```{r}
+mean(hs.df$composite_expire)
+```
+
+And our composite outcome looks pretty decent.
+
+
+
+Ventilation duration clearly appears to be associated with hyperoxic duration.
+
+
+### Crude Odds Ratio
+Leo had said he wanted to look at the mortality difference between the highest 
+hyperoxia durationgroup and the lowest duration group.
+
+
+We'll start with hospital expiration.
+```{r}
+hs.or.df <- hs.df %>% filter(hyperoxic_group == 1 | hyperoxic_group == 4)
+cont.table <- table(hs.or.df$hyperoxic_group, hs.or.df$hospital_expire)
+print(cont.table)
+crude.OR <- (cont.table[1,1] * cont.table[2,2]) / 
+  (cont.table[1,2] * cont.table[2,1])
+paste("Crude OR: ", crude.OR)
+```
+
+As can be seen above, the crude OR is `r crude.OR`.
+
+
+And now death at one year.
+```{r}
+hs.or.df <- hs.df %>% filter(hyperoxic_group == 1 | hyperoxic_group == 4 & hospital_expire == 0)
+cont.table <- table(hs.or.df$hyperoxic_group, hs.or.df$oneyear_expire)
+print(cont.table)
+crude.OR <- (cont.table[1,1] * cont.table[2,2]) / 
+  (cont.table[1,2] * cont.table[2,1])
+paste("Crude OR: ", crude.OR)
+```
+
+
+
+And now we can look at the composite:
+
+```{r}
+cont.table <- table(hs.or.df$hyperoxic_group, hs.or.df$composite_expire)
+print(cont.table)
+crude.OR <- (cont.table[1,1] * cont.table[2,2]) / 
+  (cont.table[1,2] * cont.table[2,1])
+paste("Crude OR: ", crude.OR)
+```
+
+Because of the small number of deaths in each group, it will be hard to stratify
+the groups as we will not have enough power to detect a difference.
+
+
+### Model Building
+
+I initially wanted to look at the composite, but want Leo's opinion. I spoke 
+with colleagues who suggested just looking at hospital death and one year 
+mortality as seperate.
+
+Since that is what Leo had said, I will go with those despite calling them
+secondary outcomes in the proposal.
+
+For hospital mortality, I will start with the crude association, and then adjust
+for vent_group no matter the effect as, a priori, this should be adjusted for 
+when examining this effect. From there, age, OASIS, Elixhauser, and vasopressor
+status will be sequentially added.
+
+For one-year mortality, I don't believe that OASIS score and vasopressor status
+are necessarily important predictors, and so I will not examine them as part of 
+the model. Instead, I will focus on hyperoxic group initially, and then add in
+vent duration, age, and Elixhauser.
+
+I will avoid extracting the p-value for the hypothesis tests for association
+until further discussion with Leo.
+
+#### Hospital Mortality
+```{r}
+hMort.crude <- glm(hospital_expire ~ as.factor(hyperoxic_group), family = 
+                     binomial(link = 'logit'), data = hs.df)
+coefficients(hMort.crude)
+```
+
+The crude model agrees with the tabular analysis above.
+
+```{r}
+hMort.adj <- glm(hospital_expire ~ as.factor(hyperoxic_group) + as.factor(vent_group), family = 
+                     binomial(link = 'logit'), data = hs.df)
+coefficients(hMort.adj)
+```
+
+As expected, the effect size was substantially changed by the inclusion of 
+the ventilation duration group variables.
+
+```{r}
+hMort.adj <- glm(hospital_expire ~ as.factor(hyperoxic_group) + as.factor(vent_group) + age, family = 
+                     binomial(link = 'logit'), data = hs.df)
+coefficients(hMort.adj)
+
+```
+
+Age does not substantially affect the observed relationship. I will leave it
+in the mode for now as  I expect reviewers will want an age adjusted relationship.
+
+
+```{r}
+hMort.adj <- glm(hospital_expire ~ as.factor(hyperoxic_group) + as.factor(vent_group) + age + oasis, family = 
+                     binomial(link = 'logit'), data = hs.df)
+coefficients(hMort.adj)
+
+```
+
+The OASIS score appears to also have not had much of an effect on the exposure
+of interest. I will not include it as I look at Elixhauser next.
+
+```{r}
+hMort.adj <- glm(hospital_expire ~ as.factor(hyperoxic_group) + as.factor(vent_group) + age + elixhauser, family = 
+                     binomial(link = 'logit'), data = hs.df)
+coefficients(hMort.adj)
+
+```
+
+Like OASIS, Elixhauser, is likely associated with the outcome, but it does not 
+affect the relationship between our exposure of interest and outcome. It is thus
+either a seperate predictor or co-linear, and either way could be left out of the 
+model unless it is considered important to reviewers.
+
+For now, I will not include it.
+
+```{r}
+hMort.adj <- glm(hospital_expire ~ as.factor(hyperoxic_group) + as.factor(vent_group) + age + vasopressor_flag, family = 
+                     binomial(link = 'logit'), data = hs.df)
+coefficients(hMort.adj)
+
+```
+
+
+Vasopressors also do not appear to affect the relationship between our exposure
+of interest and our outcome.
+
+Based on these results, it appears that its only important to account for 
+ventilation duration with respect to the relationship between hyerpoxic duration
+and death in the hospital.
+
+#### One year mortality
+To exlcude competing risks, I will exclude patients who died in the hospital,
+and only examine patients who survived their hospital stay using death at one
+year as the outcome and the exposure as hyperoxia. I will examine the effect
+of ventilation duration, age, and Elixhauser as confounders, but will not
+look at OASIS or vasopressors as 1) I don't believe they are important at one year
+and 2) I expect that 
+
+```{r}
+hs.df <- hs.df %>% filter(hospital_expire == 0)
+```
+
+
+```{r}
+oyMort.crude <- glm(oneyear_expire ~ as.factor(hyperoxic_group), family = 
+                     binomial(link = 'logit'), data = hs.df)
+coefficients(oyMort.crude)
+```
+
+
+```{r}
+oyMort.adj <- glm(oneyear_expire ~ as.factor(hyperoxic_group) + as.factor(vent_group), family = 
+                     binomial(link = 'logit'), data = hs.df)
+coefficients(oyMort.adj)
+```
+
+As in the previous analysis, accounting for ventilation group substantially 
+affects the measure of association between hyperoxia and one year mortality.
+It is a confounder as expect and should be included in the model.
+
+```{r}
+oyMort.adj <- glm(oneyear_expire ~ as.factor(hyperoxic_group) + as.factor(vent_group) + age, family = 
+                     binomial(link = 'logit'), data = hs.df)
+coefficients(oyMort.adj)
+```
+
+Although not substantially, age does affect our effect sizes and I would argue
+for keeping it in our model.
+
+
+```{r}
+oyMort.adj <- glm(oneyear_expire ~ as.factor(hyperoxic_group) + as.factor(vent_group) + age + elixhauser, family = 
+                     binomial(link = 'logit'), data = hs.df)
+coefficients(oyMort.adj)
+```
+
+
+Although I believe it would be important a priori, Elixhauser does not appear to play a
+large role in the association between our predictor and outcome.
+
+As I do not believe OASIS or vasopressor status to be important at one year, I 
+will not examine them.
+
+Following discussion of these data with Leo, I will examine the statistical 
+significance of these assocaitions. I will also defer examinig the compsite 
+outcome any further until I've gotten his opinion.
