@@ -6,7 +6,8 @@ output:
 ---
 
 ## Setup
-```{r warning = FALSE, message = FALSE}
+
+```r
 library(tidyverse)
 library(lubridate)
 library(stringr)
@@ -44,7 +45,8 @@ mimic <- dbConnect(drv, dbname = "mimic", host = "10.8.0.1", port = 5432,
 The initial cohort table was began in sql with the following code (adapted from
 Alistair Johnson's code). 
 
-```{sql, eval = FALSE}
+
+```sql
 SET search_path = 'mimiciii';
 
 DROP MATERIALIZED VIEW IF EXISTS hyperoxia_sepsis_baseCohort CASCADE;
@@ -141,7 +143,8 @@ INNER JOIN angus_sepsis s on b.hadm_id = s.hadm_id;
 ```
 
 Next, the base cohort can be pulled from the database.
-```{r}
+
+```r
 cohort.df <- dbGetQuery(mimic, 
                         "SELECT * FROM mimiciii.hyperoxia_sepsis_baseCohort")
 ```
@@ -155,13 +158,19 @@ First lets define a function to check the number of subjects in our cohort
 since currently our table is simply all ICU stays for the base cohort of 
 ventilated patients.
 
-```{r}
+
+```r
 subjectCount <- function(cohort) {
   cohort %>% distinct(subject_id) %>%
     summarise(count = n())
 }
 
 subjectCount(cohort.df)
+```
+
+```
+##   count
+## 1 23256
 ```
 
 We are starting with 23,256 patients. We have to be careful about inclusion and
@@ -174,7 +183,8 @@ an admission because, for example, sepsis didn't occur during it, we may
 inadverdently get rid of the 'second' admission; we'll have kept a patient with
 more than one admission by accident.
 
-```{r}
+
+```r
 adm.count <- cohort.df %>% select(subject_id, hadm_id) %>% 
   distinct(hadm_id, .keep_all = TRUE) %>% group_by(subject_id) %>% 
   summarise (count = n()) %>% 
@@ -182,6 +192,11 @@ adm.count <- cohort.df %>% select(subject_id, hadm_id) %>%
 adm.count <- adm.count %>% filter(count == 1)
 cohort.df <- cohort.df %>% filter(subject_id %in% adm.count$subject_id)
 subjectCount(cohort.df)
+```
+
+```
+##   count
+## 1 21335
 ```
 
 Next we'll exclude patients with multiple ICU stays. Although we don't want to
@@ -192,13 +207,19 @@ die in the ICU we will throw away this initial survival. Because all of this
 challenges analysis (lots of competing risk) for this work we will focus on
 single admission, single ICU stay patients.
 
-```{r}
+
+```r
 icu.count <- cohort.df %>% select(subject_id, icustay_id) %>% 
   distinct(icustay_id, .keep_all = TRUE) %>% group_by(subject_id) %>% 
   summarise(count = n()) %>% arrange(-count)
 icu.count <- icu.count %>% filter(count == 1)
 cohort.df <- cohort.df %>% filter(subject_id %in% icu.count$subject_id)
 subjectCount(cohort.df)
+```
+
+```
+##   count
+## 1 20784
 ```
 
 
@@ -208,7 +229,8 @@ to ventilation duration, and so we can now simply collapse the ventilation
 durations into single observations. If we do this right, the subject count
 shouldn't change.
 
-```{r}
+
+```r
 cohort.tidy.df <- cohort.df %>% group_by(subject_id, hadm_id, icustay_id, gender, 
                                     ethnicity) %>%
   summarise(age = mean(age), icu_los = mean(icu_length_of_stay), 
@@ -224,33 +246,72 @@ cohort.tidy.df <- cohort.df %>% group_by(subject_id, hadm_id, icustay_id, gender
 subjectCount(cohort.tidy.df)
 ```
 
+```
+## # A tibble: 1 x 1
+##   count
+##   <int>
+## 1 20784
+```
+
 We can now take a tidied dataset and exclude patients based on inclusion/exclusion
 criteria.
 
-```{r}
+
+```r
 cohort.tidy.df <- cohort.tidy.df %>% filter(angus == 1)
 subjectCount(cohort.tidy.df)
 ```
 
+```
+## # A tibble: 1 x 1
+##   count
+##   <int>
+## 1  6592
+```
+
 We have 6,592 patients in the dataset with sepsis by angus criteria.
 
-```{r}
+
+```r
 cohort.tidy.df <- cohort.tidy.df %>% filter(exclusion_age == 0)
 subjectCount(cohort.tidy.df)
 ```
 
+```
+## # A tibble: 1 x 1
+##   count
+##   <int>
+## 1  6465
+```
+
 Of thoese 6,465 meet age criteria of 16.
 
-```{r}
+
+```r
 cohort.tidy.df <- cohort.tidy.df %>% filter(exclusion_icu_expire == 0)
 subjectCount(cohort.tidy.df)
 ```
 
+```
+## # A tibble: 1 x 1
+##   count
+##   <int>
+## 1  4776
+```
+
 Of those 4,776 survived their ICU stay.
 
-```{r}
+
+```r
 cohort.tidy.df <- cohort.tidy.df %>% filter(exclusion_los == 0)
 subjectCount(cohort.tidy.df)
+```
+
+```
+## # A tibble: 1 x 1
+##   count
+##   <int>
+## 1  4776
 ```
 
 And of that set 4,776 had a long enough length of stay (none at this point had
@@ -260,9 +321,17 @@ Although we didn't genrate a flag for it initially, we also want to exclude
 patients which do not have at least four hours of ventilation time in order for
 them to have to have gotten enough exposure and in order to provide enough data.
 
-```{r}
+
+```r
 cohort.tidy.df <- cohort.tidy.df %>% filter(vent_duration > 4)
 subjectCount(cohort.tidy.df)
+```
+
+```
+## # A tibble: 1 x 1
+##   count
+##   <int>
+## 1  4585
 ```
 
 This leaves us with 4,585 subjects. We now have our baseline cohort, although
@@ -272,8 +341,22 @@ until we have developed a profile of their oxygenation exposures.
 Before continuing let us just check if there is any missig data in our current
 dataset.
 
-```{r}
+
+```r
 sapply(cohort.tidy.df, function(x) sum(is.na(x)))
+```
+
+```
+##           subject_id           icustay_id                  age 
+##                    0                    0                    0 
+##               gender            ethnicity           elixhauser 
+##                    0                    0                    0 
+##                oasis        vent_duration                angus 
+##                    0                    0                    0 
+##     vasopressor_flag      hospital_expire exclusion_icu_expire 
+##                    0                    0                    0 
+##        exclusion_age        exclusion_los 
+##                    0                    0
 ```
 
 None, great! On to exposures.
@@ -288,7 +371,8 @@ ventilation times.
 We begin by using the following code to generate a table containing all of our 
 SpO2 data.
 
-```{sql eval=FALSE}
+
+```sql
 SET search_path = 'mimiciii';
 DROP MATERIALIZED VIEW IF EXISTS spO2 CASCADE;
 CREATE MATERIALIZED VIEW spO2 AS
@@ -313,7 +397,8 @@ WHERE ce.itemid = 646 OR ce.itemid = 220277;
 
 An attempt was then made to run the following query.
 
-```{sql eval = FALSE}
+
+```sql
 SET search_path = 'mimiciii';
 DROP MATERIALIZED VIEW IF EXISTS spO2_vent CASCADE;
 CREATE MATERIALIZED VIEW spO2_vent AS
@@ -348,7 +433,8 @@ also failed (as such, eval was set to false for knitr). This was not due to
 memory, but because my server is remote and the transfer was too large for it
 to be usable.
 
-```{r eval = FALSE}
+
+```r
 spO2 <- dbGetQuery(mimic, 
                         "SELECT * FROM mimiciii.spO2")
 ```
@@ -365,13 +451,15 @@ locally.
 full path to zcat in order to unzip the file on the fly. You will have to modify
 this for it to run on your machine. If you are on Mac or Linux simply put zcat.
 
-```{r}
+
+```r
 spO2 <- as.data.frame(data.table::fread(paste0("\"C:\\Program Files\\Git\\bin\\sh.exe\" zcat < ", "./data/spO2.csv.gz"), showProgress = FALSE))
 ```
 
 Because we used fread we'll need to re-add the column names.
 
-```{r}
+
+```r
 spO2.columns <- c("row_id", "subject_id", "hadm_id", "icustay_id", "item_id", 
               "charttime", "storetime", "cgid", 
               "value", "valuenum", "valueom", "warning", "error", "resultstatus",
@@ -381,7 +469,8 @@ colnames(spO2) <- spO2.columns
 
 And now we can filter out everyone from spO2 who isn't in our cohort.
 
-```{r}
+
+```r
 spO2 <- spO2 %>% filter(spO2$subject_id %in% cohort.tidy.df$subject_id) %>%
   select(subject_id, icustay_id, charttime, valuenum)
 ```
@@ -389,7 +478,8 @@ spO2 <- spO2 %>% filter(spO2$subject_id %in% cohort.tidy.df$subject_id) %>%
 Now to get this data such that we only have SpO2 data relating to vents, we will
 begin by reloading Alistair's vent duration table.
 
-```{r eval = FALSE}
+
+```r
 vent.df <- dbGetQuery(mimic, "SELECT * FROM mimiciii.ventdurations") %>%
   filter(icustay_id %in% cohort.tidy.df$icustay_id) %>% 
   select(icustay_id, starttime, endtime)
@@ -401,7 +491,8 @@ about it on stack overflow, but needless to say it can be solved by directly
 downloading the CSV and loading it locally, and so once again this is what was
 done.
 
-```{r}
+
+```r
 vent.df <- as.data.frame(data.table::fread(paste0("\"C:\\Program Files\\Git\\bin\\sh.exe\" zcat < ", "./data/ventdurations.csv.gz"), showProgress = FALSE)) 
 vent.columns <- c("icustay_id", "ventnum", "starttime", "endtime", "duration_hours")
 colnames(vent.df) <- vent.columns
@@ -411,21 +502,24 @@ vent.df <- vent.df %>%
 ```
 
 Before joining, lets just make sure we have our data columns as dates.
-```{r}
+
+```r
 vent.df$starttime <- as_datetime(vent.df$starttime, tz = "EST")
 vent.df$endtime <- as_datetime(vent.df$endtime, tz = "EST")
 spO2$charttime <- as_datetime(spO2$charttime, tz = "EST")
 ```
 
 
-```{r}
+
+```r
 spO2.merge <- inner_join(spO2, vent.df, by = c("icustay_id"))
 ```
 
 And now to only include values that have the charttime between the start and end
 of the ventilation period.
 
-```{r}
+
+```r
 spO2.merge <- spO2.merge %>% filter(charttime >= starttime & charttime <= endtime)
 ```
 
@@ -434,14 +528,21 @@ With that we now have all of our SpO2 data. Now we'll need to summarise it in a
 way that it becomes an exposure. Before we can do that though we need to check it
 for missing values.
 
-```{r}
+
+```r
 sapply(spO2.merge, function(x) sum(is.na(x)))
+```
+
+```
+## subject_id icustay_id  charttime   valuenum  starttime    endtime 
+##          0          0          0        320          0          0
 ```
 
 We are missing a meager 320 single recordings of 897,879, and so these can be
 disregarded. 
 
-```{r}
+
+```r
 spO2.merge <- spO2.merge %>% na.omit()
 ```
 
@@ -451,7 +552,8 @@ interval and assume that at each recording point the SpO2 constant over the
 interval. This of course an approximation, but because we are applying it the same
 way to every patient it shouldn't introduce bias.
 
-```{r}
+
+```r
 hyperoxicTime <- function(times, value) {
   icustay.spO2 <- data.frame(time = times, value = value)
   icustay.spO2 <- icustay.spO2[order(icustay.spO2$time),]
@@ -495,7 +597,8 @@ hyperoxicTime <- function(times, value) {
 
 And now we can generate our hyperoxia profiles.
 
-```{r}
+
+```r
 hyperoxic.profile <- spO2.merge %>% 
   group_by(icustay_id) %>% 
   summarise(hyperoxic_duration = as.numeric(hyperoxicTime(charttime, valuenum)))
@@ -503,7 +606,8 @@ hyperoxic.profile <- spO2.merge %>%
 
 With that, we now have an exposure variable that we can use to add to our cohort.
 
-```{r}
+
+```r
 hs.df <- inner_join(cohort.tidy.df, hyperoxic.profile, by = c("icustay_id"))
 ```
 
@@ -514,7 +618,8 @@ Because we don't know what an important amount of hyperoxic time will be, we wil
 categorize the trend into quartiles and assign groups based on these quartiles.
 
 
-```{r}
+
+```r
 groups <- 4
 hs.df$hyperoxic_quartile <- 0
 hs.df$hyperoxic_group <- 0
@@ -530,7 +635,6 @@ hyperoxia.levels <- levels(hs.df$hyperoxic_quartile)
 for (i in 1:groups) {
   hs.df$hyperoxic_group[hs.df$hyperoxic_quartile == hyperoxia.levels[i]] <- i
 }
-
 ```
 
 
