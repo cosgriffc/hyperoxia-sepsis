@@ -206,19 +206,21 @@ Now we have a data frame composed of all of the ventilation instances for patien
 with 1 hadm_id and 1 icustay_id. Other covariates shouldn't vary with respect
 to ventilation duration, and so we can now simply collapse the ventilation 
 durations into single observations. If we do this right, the subject count
-shouldn't change.
+shouldn't change. For things that we know are constant by subject_id at this 
+point (e.g. ICU length of stay) we can just take the mean in the summarise 
+function.
 
 ```{r}
 cohort.tidy.df <- cohort.df %>% group_by(subject_id, hadm_id, icustay_id, gender, 
                                     ethnicity) %>%
   summarise(age = mean(age), icu_los = mean(icu_length_of_stay), 
             vent_duration = sum(vent_dur), angus = mean(angus), 
-            elixhauser = mean(elixhauser), oasis = max(oasis), 
+            elixhauser = mean(elixhauser), oasis = max(oasis),
             exclusion_icu_expire = any(icustay_expire_flag == 1),
             exclusion_age = any(exclude_age == 1), exclusion_los = any(exclusion_los),
             vasopressor_flag = any(vasopressor_flag == 1), 
             hospital_expire = any(hospital_expire_flag == 1)) %>% ungroup() %>%
-  select(subject_id, icustay_id, age, gender, ethnicity, elixhauser, oasis, vent_duration, 
+  select(subject_id, icustay_id, age, gender, ethnicity, elixhauser, oasis, icu_los, vent_duration, 
          angus, vasopressor_flag, hospital_expire, exclusion_icu_expire, exclusion_age, 
          exclusion_los)
 subjectCount(cohort.tidy.df)
@@ -507,8 +509,8 @@ With that, we now have an exposure variable that we can use to add to our cohort
 hs.df <- inner_join(cohort.tidy.df, hyperoxic.profile, by = c("icustay_id"))
 ```
 
-*Of note, we have not yet excluded hypoxic patients; having done that in the*
-*prelim, I'm going to try doing this without doing that and see what happens.*
+**Of note, we have not yet excluded hypoxic patients; having done that in the**
+**prelim, I'm going to try doing this without doing that and see what happens.**
 
 Because we don't know what an important amount of hyperoxic time will be, we will
 categorize the trend into quartiles and assign groups based on these quartiles.
@@ -533,5 +535,13 @@ for (i in 1:groups) {
 
 ```
 
+To exclude hypoxics: **Explain this section better next time you open this code.**
+
+```{r}
+spO2.merge %>% filter(valuenum < 94) %>% group_by(subject_id) %>% summarise(count = n()) %>% arrange(-count)
+exclude <- spO2.merge %>% filter(valuenum < 94) %>% group_by(subject_id) %>% summarise(count = n()) %>% arrange(-count)
+exclude <- exclude %>% filter(count >2)
+hs.noHypoxia.df <- hs.df %>% filter(!(hs.df$subject_id %in% exclude$subject_id))
+```
 
 
