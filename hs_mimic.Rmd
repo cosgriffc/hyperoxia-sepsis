@@ -510,10 +510,23 @@ hs.df <- inner_join(cohort.tidy.df, hyperoxic.profile, by = c("icustay_id"))
 ```
 
 **Of note, we have not yet excluded hypoxic patients; having done that in the**
-**prelim, I'm going to try doing this without doing that and see what happens.**
+**prelim, I'm going to proceed with and without excluding these patients.**
+
+```{r}
+spO2.merge %>% filter(valuenum < 94) %>% group_by(subject_id) %>% summarise(count = n()) %>% arrange(-count)
+exclude <- spO2.merge %>% filter(valuenum < 94) %>% group_by(subject_id) %>% summarise(count = n()) %>% arrange(-count)
+exclude <- exclude %>% filter(count >2)
+hs.noHypoxia.df <- hs.df %>% filter(!(hs.df$subject_id %in% exclude$subject_id))
+```
+
+We now have two data frames, one in which hypoxics are exclude, and one in which
+they are not. We will proceed with the frame that excludes hypoxics, and return
+to the non-excluded frame later.
 
 Because we don't know what an important amount of hyperoxic time will be, we will
 categorize the trend into quartiles and assign groups based on these quartiles.
+We will do this for both datasets here so that we can jump right into the
+sensitivity analysis later.
 
 
 ```{r}
@@ -533,15 +546,48 @@ for (i in 1:groups) {
   hs.df$hyperoxic_group[hs.df$hyperoxic_quartile == hyperoxia.levels[i]] <- i
 }
 
+hs.noHypoxia.df$hyperoxic_quartile <- 0
+hs.noHypoxia.df$hyperoxic_group <- 0
+
+hs.noHypoxia.df$hyperoxic_quartile <- with(hs.noHypoxia.df, cut(hyperoxic_duration, 
+                                breaks = quantile(hyperoxic_duration, 
+                                                  probs = seq(0,1, by = (1/groups)), 
+                                                  na.rm=TRUE), 
+                                include.lowest = TRUE))
+for (i in 1:groups) {
+  hs.noHypoxia.df$hyperoxic_group[hs.noHypoxia.df$hyperoxic_quartile == hyperoxia.levels[i]] <- i
+}
 ```
 
-To exclude hypoxics: **Explain this section better next time you open this code.**
+With that, we can now began our analysis.
+
+## Exploratory Data Analysis
+
+We will begin with the data which excludes hypoxia, and then we will convert
+binary variables to factors, and categorical variables to factors.
+
 
 ```{r}
-spO2.merge %>% filter(valuenum < 94) %>% group_by(subject_id) %>% summarise(count = n()) %>% arrange(-count)
-exclude <- spO2.merge %>% filter(valuenum < 94) %>% group_by(subject_id) %>% summarise(count = n()) %>% arrange(-count)
-exclude <- exclude %>% filter(count >2)
-hs.noHypoxia.df <- hs.df %>% filter(!(hs.df$subject_id %in% exclude$subject_id))
+hs.eda.df <- hs.noHypoxia.df
+
+hs.eda.df$gender <- as.factor(hs.eda.df$gender)
+hs.eda.df$ethnicity <- as.factor(hs.eda.df$ethnicity)
+hs.eda.df$first_careunit <- as.factor(hs.eda.df$$first_careunit)
+hs.eda.df$vasopressor_flag <- as.factor(hs.eda.df$vasopressor_flag)
+hs.eda.df$hyperoxic_group <- as.factor(hs.eda.df$hyperoxic_group)
+hs.eda.df$hospital_expire <- as.factor(hs.eda.df$hospital_expire)
+hs.eda.df$oneyear_expire <- as.factor(hs.eda.df$oneyear_expire)
 ```
+
+With that, we can create a table 1.
+
+```{r}
+CreateTableOne(vars=c("age","gender", "ethnicity", "first_careunit", "elixhauser", "icu_los", "oasis", "vasopressor_flag","vent_dur", "hyperoxic_dur", "hyperoxic_group"),
+               data=hs.eda.df)
+```
+
+
+
+
 
 
