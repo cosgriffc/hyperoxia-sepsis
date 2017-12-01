@@ -212,16 +212,17 @@ function.
 
 ```{r}
 cohort.tidy.df <- cohort.df %>% group_by(subject_id, hadm_id, icustay_id, gender, 
-                                    ethnicity) %>%
+                                    ethnicity, first_careunit) %>%
   summarise(age = mean(age), icu_los = mean(icu_length_of_stay), 
             vent_duration = sum(vent_dur), angus = mean(angus), 
             elixhauser = mean(elixhauser), oasis = max(oasis),
             exclusion_icu_expire = any(icustay_expire_flag == 1),
             exclusion_age = any(exclude_age == 1), exclusion_los = any(exclusion_los),
             vasopressor_flag = any(vasopressor_flag == 1), 
-            hospital_expire = any(hospital_expire_flag == 1)) %>% ungroup() %>%
-  select(subject_id, icustay_id, age, gender, ethnicity, elixhauser, oasis, icu_los, vent_duration, 
-         angus, vasopressor_flag, hospital_expire, exclusion_icu_expire, exclusion_age, 
+            hospital_expire = any(hospital_expire_flag == 1),
+            oneyear_expire = any(oneyear_expire == 1)) %>% ungroup() %>%
+  select(subject_id, icustay_id, age, gender, ethnicity, first_careunit, elixhauser, oasis, icu_los, vent_duration, 
+         angus, vasopressor_flag, hospital_expire, oneyear_expire, exclusion_icu_expire, exclusion_age, 
          exclusion_los)
 subjectCount(cohort.tidy.df)
 ```
@@ -566,13 +567,12 @@ With that, we can now began our analysis.
 We will begin with the data which excludes hypoxia, and then we will convert
 binary variables to factors, and categorical variables to factors.
 
-
 ```{r}
 hs.eda.df <- hs.noHypoxia.df
 
 hs.eda.df$gender <- as.factor(hs.eda.df$gender)
 hs.eda.df$ethnicity <- as.factor(hs.eda.df$ethnicity)
-hs.eda.df$first_careunit <- as.factor(hs.eda.df$$first_careunit)
+hs.eda.df$first_careunit <- as.factor(hs.eda.df$first_careunit)
 hs.eda.df$vasopressor_flag <- as.factor(hs.eda.df$vasopressor_flag)
 hs.eda.df$hyperoxic_group <- as.factor(hs.eda.df$hyperoxic_group)
 hs.eda.df$hospital_expire <- as.factor(hs.eda.df$hospital_expire)
