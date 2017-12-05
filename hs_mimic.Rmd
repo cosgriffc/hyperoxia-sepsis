@@ -219,10 +219,9 @@ cohort.tidy.df <- cohort.df %>% group_by(subject_id, hadm_id, icustay_id, gender
             exclusion_icu_expire = any(icustay_expire_flag == 1),
             exclusion_age = any(exclude_age == 1), exclusion_los = any(exclusion_los),
             vasopressor_flag = any(vasopressor_flag == 1), 
-            hospital_expire = any(hospital_expire_flag == 1),
-            oneyear_expire = any(oneyear_expire == 1)) %>% ungroup() %>%
+            hospital_expire = any(hospital_expire_flag == 1)) %>% ungroup() %>%
   select(subject_id, icustay_id, age, gender, ethnicity, first_careunit, elixhauser, oasis, icu_los, vent_duration, 
-         angus, vasopressor_flag, hospital_expire, oneyear_expire, exclusion_icu_expire, exclusion_age, 
+         angus, vasopressor_flag, hospital_expire, exclusion_icu_expire, exclusion_age, 
          exclusion_los)
 subjectCount(cohort.tidy.df)
 ```
@@ -362,24 +361,13 @@ need to run the SQL code above (the one to generate mimiciii.spO2) and then
 export that file, gzip it, and store it in "./data/" where it can be accessed
 locally.
 
-`data.table` functions were used because of the size of the data.
 
-**Note to reader:** You will see that this was coded on windows and so I used the
-full path to zcat in order to unzip the file on the fly. You will have to modify
-this for it to run on your machine. If you are on Mac or Linux simply put zcat.
-
-```{r}
-spO2 <- as.data.frame(data.table::fread(paste0("\"C:\\Program Files\\Git\\bin\\sh.exe\" zcat < ", "./data/spO2.csv.gz"), showProgress = FALSE))
-```
-
-Because we used fread we'll need to re-add the column names.
-
-```{r}
+```{r, warning=FALSE, message=FALSE}
 spO2.columns <- c("row_id", "subject_id", "hadm_id", "icustay_id", "item_id", 
               "charttime", "storetime", "cgid", 
               "value", "valuenum", "valueom", "warning", "error", "resultstatus",
               "stopped")
-colnames(spO2) <- spO2.columns
+spO2 <- as.data.frame(read_csv("./data/spO2.csv.gz", col_names = spO2.columns))
 ```
 
 And now we can filter out everyone from spO2 who isn't in our cohort.
@@ -404,10 +392,10 @@ about it on stack overflow, but needless to say it can be solved by directly
 downloading the CSV and loading it locally, and so once again this is what was
 done.
 
-```{r}
-vent.df <- as.data.frame(data.table::fread(paste0("\"C:\\Program Files\\Git\\bin\\sh.exe\" zcat < ", "./data/ventdurations.csv.gz"), showProgress = FALSE)) 
+```{r, message=FALSE, warning=FALSE}
+#vent.df <- as.data.frame(fread(paste0("\"C:\\Program Files\\Git\\bin\\sh.exe\" zcat < ", "./data/ventdurations.csv.gz"), showProgress = FALSE)) 
 vent.columns <- c("icustay_id", "ventnum", "starttime", "endtime", "duration_hours")
-colnames(vent.df) <- vent.columns
+vent.df <- as.data.frame(read_csv("./data/ventdurations.csv.gz", col_names = vent.columns))
 vent.df <- vent.df %>%
   filter(icustay_id %in% cohort.tidy.df$icustay_id) %>% 
   select(icustay_id, starttime, endtime)
@@ -531,6 +519,7 @@ sensitivity analysis later.
 
 
 ```{r}
+##Hypoxia grop
 groups <- 4
 hs.df$hyperoxic_quartile <- 0
 hs.df$hyperoxic_group <- 0
@@ -547,6 +536,7 @@ for (i in 1:groups) {
   hs.df$hyperoxic_group[hs.df$hyperoxic_quartile == hyperoxia.levels[i]] <- i
 }
 
+# No hypoxia group
 hs.noHypoxia.df$hyperoxic_quartile <- 0
 hs.noHypoxia.df$hyperoxic_group <- 0
 
@@ -555,6 +545,8 @@ hs.noHypoxia.df$hyperoxic_quartile <- with(hs.noHypoxia.df, cut(hyperoxic_durati
                                                   probs = seq(0,1, by = (1/groups)), 
                                                   na.rm=TRUE), 
                                 include.lowest = TRUE))
+hyperoxia.levels <- levels(hs.noHypoxia.df$hyperoxic_quartile)
+
 for (i in 1:groups) {
   hs.noHypoxia.df$hyperoxic_group[hs.noHypoxia.df$hyperoxic_quartile == hyperoxia.levels[i]] <- i
 }
@@ -564,27 +556,73 @@ With that, we can now began our analysis.
 
 ## Exploratory Data Analysis
 
-We will begin with the data which excludes hypoxia, and then we will convert
-binary variables to factors, and categorical variables to factors.
-
 ```{r}
 hs.eda.df <- hs.noHypoxia.df
+subjectCount(hs.eda.df)
+```
 
+
+Lets recode ethnicity since there are too many groups based on the MIMIC
+ethnicities. **move this up later**
+```{r}
+ethnicities <- c("WHITE", "BLACK", "HISPANIC", "ASIAN")
+
+for (i in 1:length(ethnicities)) {
+  hs.eda.df$ethnicity[str_detect(hs.eda.df$ethnicity, ethnicities[i])] <- ethnicities[i]
+}
+hs.eda.df$ethnicity[!(hs.eda.df$ethnicity %in% ethnicities)] <- "OTHER"
+hs.eda.df$ethnicity <- relevel(hs.eda.df$ethnicity, ref = "WHITE")
+```
+
+Also re-level care unit. **Move this up later too**
+```{r}
+hs.eda.df$first_careunit <- relevel(hs.eda.df$first_careunit, "MICU")
+```
+
+
+```{r}
 hs.eda.df$gender <- as.factor(hs.eda.df$gender)
 hs.eda.df$ethnicity <- as.factor(hs.eda.df$ethnicity)
 hs.eda.df$first_careunit <- as.factor(hs.eda.df$first_careunit)
 hs.eda.df$vasopressor_flag <- as.factor(hs.eda.df$vasopressor_flag)
 hs.eda.df$hyperoxic_group <- as.factor(hs.eda.df$hyperoxic_group)
 hs.eda.df$hospital_expire <- as.factor(hs.eda.df$hospital_expire)
-hs.eda.df$oneyear_expire <- as.factor(hs.eda.df$oneyear_expire)
 ```
+
 
 With that, we can create a table 1.
 
 ```{r}
-CreateTableOne(vars=c("age","gender", "ethnicity", "first_careunit", "elixhauser", "icu_los", "oasis", "vasopressor_flag","vent_dur", "hyperoxic_dur", "hyperoxic_group"),
-               data=hs.eda.df)
+CreateTableOne(vars=c("age","gender", "ethnicity", "first_careunit", "icu_los", "vent_duration",
+                      "elixhauser", "oasis", "vasopressor_flag"), strata = "hyperoxic_group", 
+               data=hs.eda.df, test = TRUE)
 ```
+
+```{r}
+abstract.model <- glm(hospital_expire ~ hyperoxic_group, family = binomial(link = "logit"),
+                      data = hs.eda.df)
+summary(abstract.model)
+abstract.model <- glm(hospital_expire ~ hyperoxic_group + age + gender + 
+                        ethnicity + first_careunit + icu_los + vent_duration + 
+                        oasis + elixhauser + vasopressor_flag, family = binomial(link = "logit"),
+                      data = hs.eda.df)
+summary(abstract.model)
+```
+
+
+
+
+```{r}
+sjPlot::plot_model(abstract.model, terms = c("hyperoxic_group4", "hyperoxic_group3", "hyperoxic_group2"),  order.terms = c(3, 2, 1), axis.labels = c("Hyperoxic Group 2", "Hyperoxic Group 3", "Hyperoxic Group 4"), show.values = TRUE, title = "Hospital Expiration vs. Hyperoxic Group", show.p = FALSE, axis.title = "Adjusted Odds Ratio")
+```
+
+
+```{r}
+library(broom)
+tidy(abstract.model, conf.int = TRUE, exponentiate = TRUE)
+```
+
+
 
 
 
