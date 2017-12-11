@@ -1,5 +1,5 @@
 ---
-title: 'Hyperoxia & Sepsis Mortality in the ICU'
+title: 'The Role of Hyperoxia in Sepsis Mortality'
 author: "C.V. Cosgriff, MD/MPH Student, Harvard Chan School"
 output:
   html_document: default
@@ -8,6 +8,7 @@ output:
 ## Setup
 ```{r warning = FALSE, message = FALSE}
 library(tidyverse)
+library(broom)
 library(lubridate)
 library(stringr)
 library(RPostgreSQL)
@@ -86,38 +87,9 @@ FROM oasis oa
 )
 , elixhauser AS
 (
-SELECT el.hadm_id
-    , (COALESCE(el.congestive_heart_failure, 0) + 
-       COALESCE(el.cardiac_arrhythmias, 0) + 
-       COALESCE(el.valvular_disease, 0) +
-       COALESCE(el.pulmonary_circulation, 0) +
-       COALESCE(el.peripheral_vascular, 0) +
-       COALESCE(el.hypertension, 0) +
-       COALESCE(el.paralysis, 0) +
-       COALESCE(el.other_neurological, 0) +
-       COALESCE(el.chronic_pulmonary, 0) +
-       COALESCE(el.diabetes_uncomplicated, 0) +
-       COALESCE(el.diabetes_complicated, 0) +
-       COALESCE(el.hypothyroidism, 0) +
-       COALESCE(el.renal_failure, 0) +
-       COALESCE(el.liver_disease, 0) +
-       COALESCE(el.peptic_ulcer, 0) +
-       COALESCE(el.aids, 0) +
-       COALESCE(el.lymphoma, 0) +
-       COALESCE(el.metastatic_cancer, 0) +
-       COALESCE(el.solid_tumor, 0) +
-       COALESCE(el.rheumatoid_arthritis, 0) +
-       COALESCE(el.coagulopathy, 0) +
-       COALESCE(el.obesity, 0) +
-       COALESCE(el.weight_loss, 0) +
-       COALESCE(el.fluid_electrolyte, 0) +
-       COALESCE(el.blood_loss_anemia, 0) +
-       COALESCE(el.deficiency_anemias, 0) +
-       COALESCE(el.alcohol_abuse, 0) +
-       COALESCE(el.drug_abuse, 0) +
-       COALESCE(el.psychoses, 0) +
-       COALESCE(el.depression, 0)) AS score
-    FROM elixhauser_ahrq_no_drg_all_icd el
+SELECT el.hadm_id,
+    el.elixhauser_vanwalraven AS score
+    FROM elixhauser_quan_score el
 )
 SELECT b.*, vd.duration_hours AS vent_dur, s.angus
 , CASE
@@ -150,6 +122,33 @@ This cohort contains all of the ICU stays for which ventilation data existed
 and each row actually corresponds to a ventilation duration recording. 
 We will now build the subject cohort that will eventually be used for analysis
 and as we go we will tidy the data.
+
+Before we begin inclusion/exclusion, lets do some very basic cleaning.
+
+There are ages of 300 in the dataset because of HIPPA, so we set them to the 
+median of that group per MIT LCP.
+```{r}
+cohort.df$age[cohort.df$age>100] <- 91.4
+```
+
+Lets also recode ethnicity since there are too many groups based on the MIMIC
+ethnicities.
+```{r}
+ethnicities <- c("WHITE", "BLACK", "HISPANIC", "ASIAN")
+
+for (i in 1:length(ethnicities)) {
+  cohort.df$ethnicity[str_detect(cohort.df$ethnicity, ethnicities[i])] <- ethnicities[i]
+}
+cohort.df$ethnicity[!(cohort.df$ethnicity %in% ethnicities)] <- "OTHER"
+cohort.df$ethnicity <- as.factor(cohort.df$ethnicity)
+cohort.df$ethnicity <- relevel(cohort.df$ethnicity, ref = "WHITE")
+```
+
+Also re-level care unit.
+```{r}
+cohort.df$first_careunit <- as.factor(cohort.df$first_careunit)
+cohort.df$first_careunit <- relevel(cohort.df$first_careunit, "MICU")
+```
 
 First lets define a function to check the number of subjects in our cohort 
 since currently our table is simply all ICU stays for the base cohort of 
@@ -506,6 +505,7 @@ spO2.merge %>% filter(valuenum < 94) %>% group_by(subject_id) %>% summarise(coun
 exclude <- spO2.merge %>% filter(valuenum < 94) %>% group_by(subject_id) %>% summarise(count = n()) %>% arrange(-count)
 exclude <- exclude %>% filter(count >2)
 hs.noHypoxia.df <- hs.df %>% filter(!(hs.df$subject_id %in% exclude$subject_id))
+subjectCount(hs.noHypoxia.df)
 ```
 
 We now have two data frames, one in which hypoxics are exclude, and one in which
@@ -561,25 +561,6 @@ hs.eda.df <- hs.noHypoxia.df
 subjectCount(hs.eda.df)
 ```
 
-
-Lets recode ethnicity since there are too many groups based on the MIMIC
-ethnicities. **move this up later**
-```{r}
-ethnicities <- c("WHITE", "BLACK", "HISPANIC", "ASIAN")
-
-for (i in 1:length(ethnicities)) {
-  hs.eda.df$ethnicity[str_detect(hs.eda.df$ethnicity, ethnicities[i])] <- ethnicities[i]
-}
-hs.eda.df$ethnicity[!(hs.eda.df$ethnicity %in% ethnicities)] <- "OTHER"
-hs.eda.df$ethnicity <- relevel(hs.eda.df$ethnicity, ref = "WHITE")
-```
-
-Also re-level care unit. **Move this up later too**
-```{r}
-hs.eda.df$first_careunit <- relevel(hs.eda.df$first_careunit, "MICU")
-```
-
-
 ```{r}
 hs.eda.df$gender <- as.factor(hs.eda.df$gender)
 hs.eda.df$ethnicity <- as.factor(hs.eda.df$ethnicity)
@@ -589,40 +570,189 @@ hs.eda.df$hyperoxic_group <- as.factor(hs.eda.df$hyperoxic_group)
 hs.eda.df$hospital_expire <- as.factor(hs.eda.df$hospital_expire)
 ```
 
+```{r}
+summary(hs.eda.df)
+```
 
 With that, we can create a table 1.
 
 ```{r}
 CreateTableOne(vars=c("age","gender", "ethnicity", "first_careunit", "icu_los", "vent_duration",
                       "elixhauser", "oasis", "vasopressor_flag"), strata = "hyperoxic_group", 
-               data=hs.eda.df, test = TRUE)
+               data = hs.eda.df, test = TRUE)
+```
+
+Distribution of hyperoxia?
+```{r}
+ggplot(hs.eda.df) + geom_histogram(aes(x = hyperoxic_duration)) +
+  xlab("Hyperoxic Duration")
+```
+
+By group?
+
+```{r}
+ggplot(hs.eda.df) + geom_histogram(aes(x = hyperoxic_duration, fill = hospital_expire)) + 
+  facet_wrap(~hyperoxic_group) + xlab("Hyperoxic Duration") + 
+  guides(fill = guide_legend(title="Hospital Expiration")) + ggtitle("Hyperoxia by Group")
+```
+
+Distribution of vent durations?
+
+```{r}
+ggplot(hs.eda.df) + geom_histogram(aes(x = vent_duration))
+```
+Distribution of LOS?
+
+```{r}
+ggplot(hs.eda.df) + geom_histogram(aes(x = icu_los))
+```
+
+Association between these?
+```{r}
+ggplot(hs.eda.df) + 
+  geom_point(aes(x = vent_duration, y = hyperoxic_duration), alpha = 0.5) +
+  xlab("Ventilation Duration") + ylab("Hyperoxic Duration")
 ```
 
 ```{r}
-abstract.model <- glm(hospital_expire ~ hyperoxic_group, family = binomial(link = "logit"),
+ggplot(hs.eda.df) + 
+  geom_point(aes(x = icu_los, y = hyperoxic_duration), alpha = 0.5) +
+  xlab("ICU Length of Stay") + ylab("Hyperoxic Duration")
+```
+
+Is there a clear association with death here?
+```{r}
+ggplot(hs.eda.df) + geom_point(aes(x = vent_duration, y = hyperoxic_duration, size = icu_los, color = hospital_expire), alpha = 0.5)
+```
+
+How does hyperoxic duration correlate with OASIS and Elixhauser? Any pattern for death?
+```{r}
+ggplot(hs.eda.df) + geom_point(aes(x = oasis, y = hyperoxic_duration, color = hospital_expire), alpha = 0.5)
+```
+
+Age association?
+
+```{r}
+ggplot(hs.eda.df) + geom_point(aes(x = age, y = hyperoxic_duration))
+```
+
+```{r}
+ggplot(hs.eda.df) + geom_point(aes(x = age, y = hyperoxic_duration, color = hospital_expire))
+```
+
+```{r}
+ggplot(hs.eda.df) + geom_point(aes(x = age, y = hyperoxic_duration, color = first_careunit))
+```
+
+```{r}
+ggplot(hs.eda.df) + geom_boxplot(aes(x = as.factor(elixhauser), y = hyperoxic_duration, color = hospital_expire), alpha = 0.5)
+```
+
+How do the above distributions change by our factor variables?
+```{r}
+ggplot(hs.eda.df) + geom_histogram(aes(x = hyperoxic_duration)) + facet_wrap(~gender)
+```
+
+```{r}
+ggplot(hs.eda.df) + geom_histogram(aes(x = hyperoxic_duration)) + facet_wrap(~ethnicity)
+```
+
+```{r}
+ggplot(hs.eda.df) + geom_histogram(aes(x = hyperoxic_duration)) + facet_wrap(~first_careunit)
+```
+
+```{r}
+ggplot(hs.eda.df) + geom_histogram(aes(x = hyperoxic_duration)) + facet_wrap(~vasopressor_flag)
+```
+
+Since we categorized, I also want to see some of these features across the hyperoxic groups
+```{r}
+ggplot(hs.eda.df) + geom_histogram(aes(x = icu_los)) + facet_wrap(~hyperoxic_group)
+```
+
+Outcome, outcome by group plots
+
+```{r}
+ggplot(hs.eda.df) + geom_histogram(aes(x = hyperoxic_duration)) + facet_wrap(~hospital_expire)
+```
+
+
+```{r}
+plot_prop_by_level(hs.eda.df %>% mutate(hospital_expire = as.numeric(.$hospital_expire == TRUE)), "hyperoxic_group", "hospital_expire")
+```
+
+```{r}
+plot_prop_by_level(hs.eda.df %>% mutate(hospital_expire = as.numeric(.$hospital_expire == TRUE)), 
+                   "hyperoxic_group", "hospital_expire", factor.var2 = "ethnicity") +
+  xlab("Hyperoxic Group") + ylab("Proportion Died") + 
+  guides(color = guide_legend(title="Ethnicity"))
+```
+
+```{r}
+plot_prop_by_level(hs.eda.df %>% mutate(hospital_expire = as.numeric(.$hospital_expire == TRUE)), "hyperoxic_group", "hospital_expire", factor.var2 = "ethnicity")
+```
+
+```{r}
+plot_prop_by_level(hs.eda.df %>% mutate(hospital_expire = as.numeric(.$hospital_expire == TRUE)), 
+                   "hyperoxic_group", "hospital_expire", factor.var2 = "first_careunit")
+```
+
+```{r}
+plot_prop_by_level(hs.eda.df %>% mutate(hospital_expire = as.numeric(.$hospital_expire == TRUE)), 
+                   "hyperoxic_group", "hospital_expire", factor.var2 = "vasopressor_flag")
+```
+
+```{r}
+plot_OR_by_level(hs.eda.df %>% mutate(hospital_expire = as.numeric(.$hospital_expire == TRUE)), 
+                 "hyperoxic_group", "hospital_expire") + 
+  ggtitle("Hospital Expiration vs. Hyperoxic Group (Crude)") + xlab("Hyperoxic Group")
+```
+
+```{r}
+plot_OR_by_level(hs.eda.df %>% mutate(hospital_expire = as.numeric(.$hospital_expire == TRUE)), "hyperoxic_group", "hospital_expire", factor.var2 = "gender")
+```
+
+```{r}
+plot_OR_by_level(hs.eda.df %>% mutate(hospital_expire = as.numeric(.$hospital_expire == TRUE)), "hyperoxic_group", "hospital_expire", factor.var2 = "ethnicity")
+```
+
+```{r}
+plot_OR_by_level(hs.eda.df %>% mutate(hospital_expire = as.numeric(.$hospital_expire == TRUE)), "hyperoxic_group", "hospital_expire", factor.var2 = "first_careunit")
+```
+
+```{r}
+plot_OR_by_level(hs.eda.df %>% mutate(hospital_expire = as.numeric(.$hospital_expire == TRUE)), "hyperoxic_group", "hospital_expire", factor.var2 = "vasopressor_flag")
+```
+
+
+## Modeling inference
+
+```{r}
+crude_model <- glm(hospital_expire ~ hyperoxic_group, family = binomial(link = "logit"),
                       data = hs.eda.df)
-summary(abstract.model)
-abstract.model <- glm(hospital_expire ~ hyperoxic_group + age + gender + 
+summary(crude_model)
+tidy(crude_model, exponentiate = TRUE, conf.int = TRUE)
+```
+
+```{r}
+adj_model <- glm(hospital_expire ~ hyperoxic_group + age + gender + 
                         ethnicity + first_careunit + icu_los + vent_duration + 
                         oasis + elixhauser + vasopressor_flag, family = binomial(link = "logit"),
                       data = hs.eda.df)
-summary(abstract.model)
+summary(adj_model)
+tidy(adj_model, exponentiate = TRUE, conf.int = TRUE)
 ```
 
-
-
-
+*Hoslem Goodness of Fit*
 ```{r}
-sjPlot::plot_model(abstract.model, terms = c("hyperoxic_group4", "hyperoxic_group3", "hyperoxic_group2"),  order.terms = c(3, 2, 1), axis.labels = c("Hyperoxic Group 2", "Hyperoxic Group 3", "Hyperoxic Group 4"), show.values = TRUE, title = "Hospital Expiration vs. Hyperoxic Group", show.p = FALSE, axis.title = "Adjusted Odds Ratio")
+hoslem_gof(adj_model)$p.value
 ```
 
-
-```{r}
-library(broom)
-tidy(abstract.model, conf.int = TRUE, exponentiate = TRUE)
+### Visualizing the Results
+```{r, warning = FALSE, message= FALSE}
+sjPlot::plot_model(crude_model, terms = c("hyperoxic_group4", "hyperoxic_group3", "hyperoxic_group2"),  order.terms = c(3, 2, 1), axis.labels = c("Hyperoxic Group 2", "Hyperoxic Group 3", "Hyperoxic Group 4"), show.values = TRUE, title = "Hospital Expiration vs. Hyperoxic Group (Crude)", show.p = FALSE, axis.title = "Unadjusted Odds Ratio", type = "est")
+sjPlot::plot_model(adj_model, terms = c("hyperoxic_group4", "hyperoxic_group3", "hyperoxic_group2"),  order.terms = c(3, 2, 1), axis.labels = c("Hyperoxic Group 2", "Hyperoxic Group 3", "Hyperoxic Group 4"), show.values = TRUE, title = "Hospital Expiration vs. Hyperoxic Group (Adjusted)", show.p = FALSE, axis.title = "Adjusted Odds Ratio", type = "est")
 ```
-
-
 
 
 
