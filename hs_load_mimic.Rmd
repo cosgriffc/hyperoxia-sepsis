@@ -1,0 +1,496 @@
+---
+title: "Hyperoxic Load & Sepsis"
+author: "C.V. Cosgriff, MD/MPH Student, Harvard Chan School"
+output:
+  html_document: default
+---
+
+## Libraries & Database Connection
+```{r warning = FALSE, message = FALSE}
+library(tidyverse)
+library(broom)
+library(lubridate)
+library(stringr)
+library(RPostgreSQL)
+library(MIMICbook) #JRaffa's MIMIC code book
+library(epitools) # For calculating OR's
+library(tableone) # Generating Table 1
+library(sjstats) # Some useful stats tools e.g. hoslem_gof
+library(sjPlot)
+
+library(rstudioapi)
+
+library(dslabs) # Dr. Irrizary's library 
+ds_theme_set() # Dr. Irrizary's theme
+
+# Database access; you'll need to change 10.8.0.1 to the server you are using
+# and you will also need to run ths in RStudio as I use the RStudio API to ask
+# for a password. Edit this definition for your environment as need.
+drv <- dbDriver("PostgreSQL")
+mimic <- dbConnect(drv, dbname = "mimic", host = "10.8.0.1", port = 5432,
+                   user = "mimicuser", 
+                   password = askForPassword("MIMIC Password: "))
+```
+
+## Cohort Extraction
+The initial cohort table was began in sql with the following code (adapted from
+Alistair Johnson and Tom Pollard's code). 
+
+```{sql, eval = FALSE}
+SET search_path = 'mimiciii';
+
+DROP MATERIALIZED VIEW IF EXISTS hyperoxia_sepsis_baseCohort CASCADE;
+CREATE MATERIALIZED VIEW hyperoxia_sepsis_baseCohort AS
+
+WITH icuStaysBase AS 
+(
+SELECT icu.subject_id, icu.hadm_id, icu.icustay_id, adm.hospital_expire_flag
+, EXTRACT(EPOCH FROM outtime - intime)/60.0/60.0/24.0 as icu_length_of_stay
+, EXTRACT('epoch' from icu.intime - pat.dob) / 60.0 / 60.0 / 24.0 / 365.242 as age
+, pat.gender, adm.ethnicity
+, CASE
+        WHEN adm.deathtime BETWEEN icu.intime and icu.outtime
+            THEN 1
+        -- sometimes there are typographical errors in the death date, so check before intime
+        WHEN adm.deathtime <= icu.intime
+            THEN 1
+        WHEN adm.dischtime <= icu.outtime
+            AND adm.discharge_location = 'DEAD/EXPIRED'
+            THEN 1
+        ELSE 0
+        END AS icustay_expire_flag
+
+FROM icustays icu
+INNER JOIN patients pat /* Inner join because we only need patients who had an ICU stay */
+  ON icu.subject_id = pat.subject_id
+INNER JOIN admissions adm /* Inner join because we only care about admissions which have an ICU stay */
+    ON icu.hadm_id = adm.hadm_id
+)
+, ventDurations AS
+(
+SELECT vd.icustay_id, vd.duration_hours
+FROM ventdurations vd
+)
+, oasisscore AS
+(
+SELECT oa.icustay_id, oa.oasis
+FROM oasis oa
+)
+, elixhauser AS
+(
+SELECT el.hadm_id,
+    el.elixhauser_vanwalraven AS score
+    FROM elixhauser_quan_score el
+)
+SELECT b.*, vd.duration_hours AS vent_dur, s.angus
+, CASE
+	WHEN b.icu_length_of_stay <= 0.1666667 THEN 1
+    ELSE 0 END
+    AS exclusion_los
+, CASE
+	WHEN b.age < 16 then 1
+    ELSE 0 END
+    AS exclude_age
+, el.score AS elixhauser, oa.oasis
+, CASE
+	WHEN (SELECT count(vpd.icustay_id) FROM vasopressordurations vpd WHERE b.icustay_id = vpd.icustay_id AND vpd.duration_hours > 0) > 0 THEN 1
+    ELSE 0 END
+    AS vasopressor_flag
+FROM icuStaysBase b
+INNER JOIN oasis oa on b.icustay_id = oa.icustay_id
+INNER JOIN elixhauser el on b.hadm_id = el.hadm_id
+INNER JOIN ventDurations vd ON b.icustay_id = vd.icustay_id /* Our cohort it will only include people who were ventilated */
+INNER JOIN angus_sepsis s on b.hadm_id = s.hadm_id;
+```
+
+Next, the base cohort can be pulled from the database.
+```{r}
+cohort <- dbGetQuery(mimic, 
+                        "SELECT * FROM mimiciii.hyperoxia_sepsis_baseCohort")
+```
+
+This cohort contains all of the ICU stays for which ventilation data existed
+and each row actually corresponds to a ventilation duration recording. 
+We will now build the subject cohort that will eventually be used for analysis
+and as we go we will tidy the data.
+
+Before we begin inclusion/exclusion, lets do some very basic cleaning.
+
+There are ages of 300 in the dataset because of HIPPA, so we set them to the 
+median of that group per MIT LCP.
+
+```{r}
+cohort$age[cohort$age>100] <- 91.4
+```
+
+Lets also recode ethnicity since there are too many groups based on the MIMIC
+ethnicities.
+```{r}
+ethnicities <- c("WHITE", "BLACK", "HISPANIC", "ASIAN")
+
+for (i in 1:length(ethnicities)) {
+  cohort$ethnicity[str_detect(cohort$ethnicity, ethnicities[i])] <- ethnicities[i]
+}
+cohort$ethnicity[!(cohort$ethnicity %in% ethnicities)] <- "OTHER"
+cohort$ethnicity <- as.factor(cohort$ethnicity)
+cohort$ethnicity <- relevel(cohort$ethnicity, ref = "WHITE")
+```
+
+Now we can begin including/excluding patients to form the study cohort. We start
+by introducing a function for examining the number of unique subjects in our
+study.
+
+```{r}
+subjectCount <- function(cohort) {
+  cohort %>% distinct(subject_id) %>%
+    summarise(count = n())
+}
+
+subjectCount(cohort)
+```
+
+We are starting with 23,256 patients. We have to be careful about inclusion and
+exclusion because some flags apply to hospital admissions, and others apply to
+ICU stays specifically; in the end we want to exclude any subject who has met
+exclusion criteria at some point. We also have elected to not deal with 
+integrating data across multiple admissions and so we'll first remove subjects
+with multiple admissions. This step has to be done first because if we exclude 
+an admission because, for example, sepsis didn't occur during it, we may 
+inadverdently get rid of the 'second' admission; we'll have kept a patient with
+more than one admission by accident.
+
+```{r}
+adm_count <- cohort %>% select(subject_id, hadm_id) %>% 
+  distinct(hadm_id, .keep_all = TRUE) %>% group_by(subject_id) %>% 
+  summarise (count = n()) %>% 
+  arrange(-count)
+adm_count <- adm_count %>% filter(count == 1)
+cohort <- cohort %>% filter(subject_id %in% adm_count$subject_id)
+subjectCount(cohort)
+```
+Next we'll exclude patients with multiple ICU stays. Although we don't want to
+throw away data, this is useful for the following reason: consider a patient
+goes to the ICU, gets blasted with O2, and makes it to the floor, and then 
+returns to the ICU the next day and dies. Since we are excluding patients who 
+die in the ICU we will throw away this initial survival. Because all of this
+challenges analysis (lots of competing risk) for this work we will focus on
+single admission, single ICU stay patients.
+
+```{r}
+icu_count <- cohort %>% select(subject_id, icustay_id) %>% 
+  distinct(icustay_id, .keep_all = TRUE) %>% group_by(subject_id) %>% 
+  summarise(count = n()) %>% arrange(-count)
+icu_count <- icu_count %>% filter(count == 1)
+cohort <- cohort %>% filter(subject_id %in% icu_count$subject_id)
+subjectCount(cohort)
+```
+
+Now we have a data frame composed of all of the ventilation instances for patients
+with 1 hadm_id and 1 icustay_id. Other covariates shouldn't vary with respect
+to ventilation duration, and so we can now simply collapse the ventilation 
+durations into single observations. If we do this right, the subject count
+shouldn't change. For things that we know are constant by subject_id at this 
+point (e.g. ICU length of stay) we can just take the mean in the summarise 
+function.
+
+```{r}
+cohort <- cohort %>% group_by(subject_id, hadm_id, icustay_id, gender, 
+                                    ethnicity, first_careunit) %>%
+  summarise(age = mean(age), icu_los = mean(icu_length_of_stay), 
+            vent_duration = sum(vent_dur), angus = mean(angus), 
+            elixhauser = mean(elixhauser), oasis = max(oasis),
+            exclusion_icu_expire = any(icustay_expire_flag == 1),
+            exclusion_age = any(exclude_age == 1), exclusion_los = any(exclusion_los),
+            vasopressor_flag = any(vasopressor_flag == 1), 
+            hospital_expire = any(hospital_expire_flag == 1)) %>% ungroup() %>%
+  select(subject_id, icustay_id, age, gender, ethnicity, first_careunit, elixhauser, oasis, icu_los, vent_duration, 
+         angus, vasopressor_flag, hospital_expire, exclusion_icu_expire, exclusion_age, 
+         exclusion_los)
+subjectCount(cohort)
+```
+
+Now, with each row corresponding to a potential subject, we can begin to exclude
+patients.
+
+We start by keeping only septic patients by the Angus criteria.
+
+```{r}
+cohort <- cohort %>% filter(angus == 1)
+subjectCount(cohort)
+```
+
+We then exclude patients below age 16, those who died before completing their
+ICU stay, and those who had an LOS <4h. These were encoded as flags during the 
+SQL pull and so we can exclude them same as we did with sepsis above.
+
+```{r}
+cohort <- cohort %>% filter(exclusion_age == 0)
+subjectCount(cohort)
+cohort <- cohort %>% filter(exclusion_icu_expire == 0)
+subjectCount(cohort)
+cohort <- cohort %>% filter(exclusion_los == 0)
+subjectCount(cohort)
+cohort <- cohort %>% filter(vent_duration > 4)
+subjectCount(cohort)
+```
+
+This leaves us with 4,585 subjects. We now have our baseline cohort, although
+we have not taken into account any desaturations. This however cannot be done
+until we have developed a profile of their oxygenation exposures. 
+
+Before continuing let us just check if there is any missig data in our current
+dataset.
+
+```{r}
+sapply(cohort, function(x) sum(is.na(x)))
+```
+
+None, great! On to exposures.
+
+
+## Exposure Data
+
+The goal is to generate a table containing all of the necessary SpO2 data. This
+is computationally challenging because not only are their millions of SpO2 data,
+but we also only want to only grab SpO2 data that falls within our patients
+ventilation times.
+
+We begin by using the following code to generate a table containing all of our 
+SpO2 data.
+
+```{sql eval=FALSE}
+SET search_path = 'mimiciii';
+DROP MATERIALIZED VIEW IF EXISTS spO2 CASCADE;
+CREATE MATERIALIZED VIEW spO2 AS
+SELECT ce.row_id,
+    ce.subject_id,
+    ce.hadm_id,
+    ce.icustay_id,
+    ce.itemid,
+    ce.charttime,
+    ce.storetime,
+    ce.cgid,
+    ce.value,
+    ce.valuenum,
+    ce.valueuom,
+    ce.warning,
+    ce.error,
+    ce.resultstatus,
+    ce.stopped
+FROM mimiciii.chartevents ce
+WHERE ce.itemid = 646 OR ce.itemid = 220277;
+```
+
+An attempt was then made to run the following query.
+
+```{sql eval = FALSE}
+SET search_path = 'mimiciii';
+DROP MATERIALIZED VIEW IF EXISTS spO2_vent CASCADE;
+CREATE MATERIALIZED VIEW spO2_vent AS
+SELECT ce.row_id,
+    ce.subject_id,
+    ce.hadm_id,
+    ce.icustay_id,
+    ce.itemid,
+    ce.charttime,
+    vd.starttime,
+    vd.endtime,
+    ce.storetime,
+    ce.cgid,
+    ce.value,
+    ce.valuenum,
+    ce.valueuom,
+    ce.warning,
+    ce.error,
+    ce.resultstatus,
+    ce.stopped
+FROM mimiciii.spO2 ce
+INNER JOIN ventdurations vd ON ce.icustay_id = vd.icustay_id
+WHERE vd.starttime <= ce.charttime AND vd.endtime >= ce.charttime;
+```
+
+However, this query would not run on my server (which has numerous VMs) because
+of a lack of memory. To handle this I elected to collect all of the SpO2 data
+into a vector from which I could then filter it down to the current cohort.
+
+An attempt was made to pulled the necessary data right into a vector, but this
+also failed (as such, eval was set to false for knitr). This was not due to
+memory, but because my server is remote and the transfer was too large for it
+to be usable.
+
+```{r eval = FALSE}
+spO2 <- dbGetQuery(mimic, 
+                        "SELECT * FROM mimiciii.spO2")
+```
+
+The full SpO2 table was exported and gziped. It was then stored locally in 
+./data which is not in the repo. If you wish to recreate this project you'll
+need to run the SQL code above (the one to generate mimiciii.spO2) and then
+export that file, gzip it, and store it in "./data/" where it can be accessed
+locally.
+
+
+```{r, warning=FALSE, message=FALSE}
+spO2_columns <- c("row_id", "subject_id", "hadm_id", "icustay_id", "item_id", 
+              "charttime", "storetime", "cgid", 
+              "value", "valuenum", "valueom", "warning", "error", "resultstatus",
+              "stopped")
+spO2 <- as.data.frame(read_csv("./data/spO2.csv.gz", col_names = spO2_columns))
+```
+
+And now we can filter out everyone from spO2 who isn't in our cohort.
+
+```{r}
+spO2 <- spO2 %>% filter(spO2$subject_id %in% cohort$subject_id) %>%
+  select(subject_id, icustay_id, charttime, valuenum)
+```
+
+Now to get this data such that we only have SpO2 data relating to vents, we will
+begin by reloading the LCP's vent duration table.
+
+```{r eval = FALSE}
+vent <- dbGetQuery(mimic, "SELECT * FROM mimiciii.ventdurations") %>%
+  filter(icustay_id %in% cohort$icustay_id) %>% 
+  select(icustay_id, starttime, endtime)
+```
+
+However, it was at this time that I discovered a bug in RPostgresSQL which causes
+it to throw away the time associated with a POSIX datetime. There are discussions
+about it on stack overflow, but needless to say it can be solved by directly 
+downloading the CSV and loading it locally, and so once again this is what was
+done.
+
+```{r, message=FALSE, warning=FALSE}
+#vent <- as.data.frame(fread(paste0("\"C:\\Program Files\\Git\\bin\\sh.exe\" zcat < ", "./data/ventdurations.csv.gz"), showProgress = FALSE)) 
+vent_columns <- c("icustay_id", "ventnum", "starttime", "endtime", "duration_hours")
+vent <- as.data.frame(read_csv("./data/ventdurations.csv.gz", col_names = vent_columns))
+vent <- vent %>%
+  filter(icustay_id %in% cohort$icustay_id) %>% 
+  select(icustay_id, starttime, endtime)
+```
+
+
+Before joining, lets just make sure we have our data columns as dates.
+
+```{r}
+vent$starttime <- as_datetime(vent$starttime, tz = "EST")
+vent$endtime <- as_datetime(vent$endtime, tz = "EST")
+spO2$charttime <- as_datetime(spO2$charttime, tz = "EST")
+```
+
+And now we perform a join of these spO2 data with the vent data; with that
+we can then filter the table to only include spO2 recordings from within the
+patients ventilation period by using the spO2 charttime and the start and end
+time of ventilation.
+
+```{r}
+spO2_vent <- inner_join(spO2, vent, by = c("icustay_id"))
+spO2_vent <- spO2_vent %>% filter(charttime >= starttime & charttime <= endtime)
+```
+
+With that we now have all of our SpO2 data. Now we'll need to summarise it in a
+way that it becomes an exposure. Before we can do that though we need to check it
+for missing values.
+
+```{r}
+sapply(spO2_vent, function(x) sum(is.na(x)))
+```
+
+We are missing a meager 323 single recordings of 897,879, and so these can be
+disregarded. 
+
+```{r}
+spO2_vent <- spO2_vent %>% na.omit()
+```
+
+## Defining Hyperoxia from SpO2 Data
+
+With this spO2 data in hand we need to now develop a summary measure, and then
+create an exposure variable. There are some important considertions in doing in
+approaching this. First off, we have to be careful about capturing distinct 
+ventilation periods. If we write a function that sums across the patient's values
+in the ICU the gap between two vent periods may be captured as part of the
+summary value. We also need to consider how to treat outliers and impossible 
+values. We can begin by looking at our spO2 values.
+
+```{r}
+summary(spO2_vent)
+```
+
+Looking at the values for the spO2 data we see that the minima is 0 and the 
+maxima is 1000. We should assess how many values fall in this impossible range.
+
+```{r}
+summary(spO2_vent %>% filter(valuenum > 100))
+length(spO2_vent$valuenum[spO2_vent$valuenum > 100])
+```
+So there are only 3 values above 3. With respect to the other side of the 
+distribution, how many recordings are below 50.
+
+```{r}
+length(spO2_vent$valuenum[spO2_vent$valuenum < 50])
+```
+
+187 values below 50 out of 897,556 is reassuring as they are unlikely to be
+very important in challenging the valdity of our results. Even fewer are below 10
+and some of these many thousands of recordings are likely just entry errors
+(e.g. 10 was just 100 with a dropped 0). For now, we'll just exclude the three
+records above 100 as a value of 1000 could damage the summarization, but the 
+very low values can be kept as they are unlikely to cause much instability. 
+
+```{r}
+spO2_vent <- spO2_vent %>% filter(valuenum <= 100)
+```
+
+Before summarizing we can look at the oxygen saturation trajectories for some of
+the subjects to get a better understanding of how the data looks.
+
+```{r}
+sample_id <-  sample(cohort$subject_id, 1) # 59970 a good example of two vent periods
+spO2_sample <- spO2_vent %>% filter(subject_id == sample_id)
+spO2_sample <- spO2_sample[order(spO2_sample$charttime),]
+spO2_sample %>% ggplot(aes(x = charttime, y = valuenum)) + geom_point() +
+  geom_smooth(se = F)
+```
+
+Running the above code a few times demonstrates various patterns of SpO2 
+recordings over a hospital stay. 
+
+
+Now lets examine the trajectories if we normalize the data such that 98 is taken
+as a reference point for normalcy; we can plot these as a line and use geom_area
+to get an idea of the AUC. 
+
+```{r}
+sample_id <-  sample(cohort$subject_id, 1) # 59970 a good example of two vent periods
+spO2_sample <- spO2_vent %>% filter(subject_id == sample_id)
+spO2_sample <- spO2_sample[order(spO2_sample$charttime),]
+spO2_sample$valuenum <- spO2_sample$valuenum - 98
+spO2_sample %>% ggplot(aes(x = charttime, y = valuenum)) + geom_point() +
+  geom_line() + geom_area(aes(fill = valuenum > 0), alpha = 0.5)
+```
+
+Building off the ideas expressed by Du and Shen, the goal is to develop a 
+measure of the "hyperoxic load" by calculating the AUC of an SpO2 per time
+curve. By taking all values relative to 98 a patient's "load" benefits from 
+periods below 98, and suffers from periods above. The cutoff of 98% can be
+addressed in a sensitivity analysis. Of note, we plan to exclude patients
+who have had more than 2 hypoxic events, and, as such, we will idealy have a 
+majority of patients who can have as much as +2 and as low as -4, and then 
+we'll integrate these curves with respect to time.
+
+To get a load per patient, we'll write a function that takes chart times
+and recordings, orders them, and then generates a curve. We'll take all values
+relative to 98, and then we'll 
+
+
+
+
+
+
+
+
+
+
+
+
