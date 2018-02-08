@@ -481,12 +481,108 @@ we'll integrate these curves with respect to time.
 
 To get a load per patient, we'll write a function that takes chart times
 and recordings, orders them, and then generates a curve. We'll take all values
-relative to 98, and then we'll 
+relative to 98, and then we'll integrate.
+
+### SpO2 Integrator
+
+```{r}
+satIntegrate <- function(time, sat) {
+  # Take time relative to first time
+  x <- as_datetime(time)
+  x <- as.numeric(x - x[1])/3600
+  
+  # Center sat values at 98%
+  sat <- sat - 98
+  
+  spO2_auc <- data.frame(value = AUC(x, sat, method = c("trapezoid")))
+}
+
+hyperoxicLoad <- function(time, value) {
+  # The goal is to first discern how many vent periods we have so that we 
+  # integrate them as separate groups.
+  sat_df <- data.frame(time = as_datetime(time), value = value, 
+                             period = 1) %>% na.omit()
+  sat_df <- sat_df[order(sat_df$time),]
+  
+  
+   # old: intervals <- as.numeric(icustay_spO2$time - lag(icustay_spO2$time))
+  intervals <- diff(sat_df$time)
+  intervals <- c(0, intervals) # get rid of the NA, and consider this the "start"
+  cbind(sat_df, intervals)
+  
+  # Automatically separate different vent periods by assuming more than 3 hours
+  # without a recording means we are looking at a new ventilation period.
+  curr_period <- 1
+  j <- 1
+  for (i in sat_df$intervals) {
+    if (i/60 > 3) {
+        curr_period <- curr_period + 1
+    }
+    sat_df$period[j] <- curr_period
+    j <- j + 1
+  }
+  
+  # Now we can integrate the periods separtely
+  hyperoxic <- sat_df %>% group_by(period) %>% 
+    do(satIntegrate(.$time, .$value))
+  hyperoxicLoad <- sum(hyperoxic$value)
+  
+  return(hyperoxicLoad)
+}
+```
 
 
+Testing the integrator:
+```{r}
+hyperoxic_profile <- spO2_vent %>% 
+  group_by(icustay_id) %>% 
+  summarise(hyperoxic_load = as.numeric(hyperoxicLoad(charttime, valuenum)))
+```
+
+```{r}
+#sample_id <-  sample(cohort$subject_id, 1) # 59970 a good example of two vent periods
+sample_id <- 97848
+spO2_sample <- spO2_vent %>% filter(subject_id == sample_id)
+#spO2_sample$valuenum <- spO2_sample$valuenum - 98
+spO2_sample <- spO2_sample[order(spO2_sample$charttime),]
+#spO2_sample$charttime <- spO2_sample$charttime - spO2_sample$charttime[1]
+spO2_sample %>% ggplot(aes(x = charttime, y = valuenum)) + geom_point() +
+  geom_line()
+hyperoxicLoad(spO2_sample$charttime, spO2_sample$valuenum)
+```
+
+```{r}
+spO2_test <- spO2_sample # this is subject 97848 who has a nice curve
+spO2_test$valuenum <- 96
+spO2_test %>% ggplot(aes(x = charttime, y = valuenum)) + geom_point() +
+  geom_line()
+hyperoxicLoad(spO2_test$charttime, spO2_test$valuenum)
+```
 
 
+I believe this is working!
 
+Lets define the exposure as 1 full day of hyperoxia; that would be a load of 48 load-hours.
+With that, lets move on to examining this data in our cohort and see if it makes sense on EDA>.
+
+
+## EDA Part 1: Understanding the Hyperoxic Load
+
+```{r}
+cohort_hs <- inner_join(cohort, hyperoxic_profile, by = "icustay_id")
+```
+```{r}
+glimpse(cohort_hs)
+```
+
+We no longer need angus and so we can drop that variable.
+```{r}
+cohort_hs <- cohort_hs %>% select(-angus)
+```
+
+```{r}
+summary(cohort_hs)
+```
 
 
 
